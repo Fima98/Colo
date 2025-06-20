@@ -110,8 +110,28 @@ async def game_ws(websocket: WebSocket, code: str):
 
         # Keep the connection alive indefinitely
         while True:
-            # Placeholder: could handle in-game messages here
-            await asyncio.sleep(60 * 60)
+            data = await websocket.receive_json()
+
+            if data.get("type") == "ready":
+                current_player.is_ready = True
+                print(f"{current_player.name} is ready in game {code}")
+                await game.broadcast({
+                    "status": "player_ready",
+                    "player_name": current_player.name,
+                    "players": game.to_dict_list()
+                })
+
+            if all(p.is_ready for p in game.players):
+                if len(game.players) > 1:
+                    print(f"All players ready in game {code}")
+                    await game.broadcast({
+                        "status": "game_started"
+                    })
+                else:
+                    await current_player.websocket.send_json({
+                        "status": "error",
+                        "message": "Bro, you're alone. Invite someone else to start the game."
+                    })
 
     except WebSocketDisconnect:
         # Handle clean-up on disconnect

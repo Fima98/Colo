@@ -1,8 +1,7 @@
-from typing import List
-import asyncio
-from .utils import generate_game_code
+from typing import List, Dict, Tuple
 from ..models.player import Player
-from fastapi import WebSocket
+from .utils import generate_deck
+import random
 
 MAX_PLAYERS_PER_GAME = 4
 
@@ -16,6 +15,13 @@ class Game:
     def __init__(self, code: str):
         self.code = code              # Unique game identifier
         self.players: List[Player] = []  # List of Player objects in this game
+
+        # Game states
+        self.started = False
+
+        # Cards
+        self.deck: List[dict] = []
+        self.discard_pile: List[dict] = []
 
     async def broadcast(self, message: dict):
         """
@@ -56,3 +62,23 @@ class Game:
         Get a serializable list of player info dicts.
         """
         return [p.to_dict() for p in self.players]
+
+    def start_game(self):
+        self.started = True
+        self.deck, hands = generate_deck(len(self.players))
+
+        # Assign cards to players
+        player_ids = [p.id for p in self.players]
+        self.deck, hands = generate_deck(player_ids)
+
+        for player in self.players:
+            player.hand = hands[player.id]
+
+        # Place the first valid card in the discard pile
+        first_card = self.deck.pop()
+        while first_card.get("value") in ["+4", "rainbow"]:
+            self.deck.append(first_card)
+            random.shuffle(self.deck)
+            first_card = self.deck.pop()
+
+        self.discard_pile.append(first_card)
