@@ -23,6 +23,9 @@ class Game:
         self.deck: List[dict] = []
         self.discard_pile: List[dict] = []
 
+        # Game order management
+        self.order: 'GameOrder' = None  # Will be initialized when the game starts
+
     async def broadcast(self, message: dict):
         """
         Send a JSON message to all connected players.
@@ -82,3 +85,58 @@ class Game:
             first_card = self.deck.pop()
 
         self.discard_pile.append(first_card)
+
+        # Shuffle the player order
+        random.shuffle(self.players)
+
+        # Initialize the game order
+        self.order = GameOrder(self.players)
+
+
+class GameOrder:
+    class OrderNode:
+        def __init__(self, player: Player):
+            self.player = player
+            self.next: 'GameOrder.OrderNode' = None
+            self.prev: 'GameOrder.OrderNode' = None
+
+    def __init__(self, players: List[Player]):
+        if len(players) != 4:
+            raise ValueError("GameOrder requires exactly 4 players.")
+
+        # Create nodes
+        self.nodes = [self.OrderNode(p) for p in players]
+
+        # Link them in a circular doubly linked list
+        for i in range(4):
+            self.nodes[i].next = self.nodes[(i + 1) % 4]
+            self.nodes[i].prev = self.nodes[(i - 1) % 4]
+
+        self.current = self.nodes[0]  # Starting player
+        self.reversed = False         # Play direction
+
+    def get_current_player(self) -> Player:
+        return self.current.player
+
+    def next_turn(self):
+        """
+        Move to the next player based on direction.
+        """
+        self.current = self.current.prev if self.reversed else self.current.next
+
+    def reverse(self):
+        """
+        Reverse the order of turns.
+        """
+        self.reversed = not self.reversed
+
+    def to_list(self) -> List[str]:
+        """
+        Return the list of player names in current order for debugging.
+        """
+        result = []
+        node = self.current
+        for _ in range(4):
+            result.append(node.player.name)
+            node = node.prev if self.reversed else node.next
+        return result
