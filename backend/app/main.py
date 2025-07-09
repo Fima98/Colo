@@ -1,14 +1,13 @@
-from typing import Optional, Dict, List, Union
-import asyncio
+from typing import Dict, Union
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-# Import a utility to generate unique game codes
+# Import a utilities
 from .lib.utils import generate_game_code
 # Import the Player model (holds name, websocket connection, etc.)
 from .models.player import Player
-from .lib.game import Game, MAX_PLAYERS_PER_GAME
+from .lib.game import Game
 
 app = FastAPI()
 
@@ -127,10 +126,28 @@ async def game_ws(websocket: WebSocket, code: str):
                     await game.broadcast({
                         "status": "game_started"
                     })
+                    game.start_game()
                 else:
                     await current_player.websocket.send_json({
                         "status": "error",
                         "message": "Bro, you're alone. Invite someone else to start the game."
+                    })
+                break
+
+        # Start the game loop
+        while True:
+            data = await websocket.receive_json()
+            if data.get("move"):
+                move = data["move"]
+                # Process the player's move
+                if game.order.current_player() == current_player:
+                    print(
+                        f"{current_player.name} made a move in game {code}: {move}")
+                    await game.process_move(current_player, move)
+                else:
+                    await current_player.websocket.send_json({
+                        "status": "error",
+                        "message": "It's not your turn."
                     })
 
     except WebSocketDisconnect:

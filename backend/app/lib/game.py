@@ -92,6 +92,119 @@ class Game:
         # Initialize the game order
         self.order = GameOrder(self.players)
 
+    async def process_move(self, player: Player, move: dict):
+        """
+        Process a move made by a player.
+        Supports playing multiple cards of the same value, including action cards.
+
+        move = {
+            "cards": List[{"color": str, "value": str}],
+            # for wild cards: "new_color": str
+        }
+        """
+        cards = move.get("cards")
+        if not cards or not isinstance(cards, list):
+            await player.websocket.send_json({
+                "status": "error",
+                "message": "Move must include a list of 'cards'."
+            })
+            return
+
+        # Check all cards have the same value
+        first_value = cards[0]["value"]
+        if any(c["value"] != first_value for c in cards):
+            await player.websocket.send_json({
+                "status": "error",
+                "message": "All cards played in a turn must have the same value."
+            })
+            return
+
+        # Check player owns all cards
+        for card in cards:
+            if card not in player.hand:
+                await player.websocket.send_json({
+                    "status": "error",
+                    "message": "You cannot play a card you don't have."
+                })
+                return
+
+        top = self.discard_pile[-1]
+        color_matches = cards[0]["color"] == top["color"]
+        value_matches = cards[0]["value"] == top["value"]
+        is_wild = cards[0]["value"] in ["rainbow", "+4"]
+
+        if not (color_matches or value_matches or is_wild):
+            await player.websocket.send_json({
+                "status": "error",
+                "message": "Invalid card played."
+            })
+            return
+
+        # Remove cards from player's hand and place on discard pile
+        for card in cards:
+            player.hand.remove(card)
+            self.discard_pile.append(card)
+
+        # Handle wild cards
+        if first_value in ["rainbow", "+4"]:
+            new_color = move.get("new_color")
+            if new_color not in ["red", "yellow", "green", "blue"]:
+                await player.websocket.send_json({
+                    "status": "error",
+                    "message": "You must specify a valid new_color for wild cards."
+                })
+                for card in cards:
+                    player.hand.append(card)
+                    self.discard_pile.pop()
+                return
+            cards[-1]["color"] = new_color  # Only final card sets color
+
+        current_idx = self.order.nodes.index(
+            next(n for n in self.order.nodes if n.player.id == player.id)
+        )
+
+        def next_idx(steps=1):
+            idx = current_idx
+            for _ in range(steps):
+                idx = (idx - 1) if self.order.reversed else (idx + 1)
+                idx %= len(self.order.nodes)
+            return idx
+
+        # Handle action cards stacking
+        if first_value == "+2":
+            total_draw = 2 * len(cards)
+            target = self.order.nodes[next_idx()].player
+            for _ in range(total_draw):
+                if self.deck:
+                    target.hand.append(self.deck.pop())
+        elif first_value == "+4":
+            total_draw = 4 * len(cards)
+            target = self.order.nodes[next_idx()].player
+            for _ in range(total_draw):
+                if self.deck:
+                    target.hand.append(self.deck.pop())
+        elif first_value == "block":
+            self.order.current = self.order.nodes[next_idx(
+                steps=1 + len(cards))]
+        elif first_value == "reverse":
+            for _ in range(len(cards)):
+                self.order.reverse()
+            if len(self.players) == 2 and len(cards) % 2 == 1:
+                self.order.current = self.order.nodes[next_idx()]
+
+        # Move to next turn if not a skip or forced advance
+        if first_value not in ["block", "reverse"]:
+            self.order.next_turn()
+
+        # Broadcast updated game state to all players
+        await self.broadcast({
+            "status": "move_accepted",
+            "player_id": player.id,
+            "cards": cards,
+            "hands": {p.id: len(p.hand) for p in self.players},
+            "next_player": self.order.get_current_player().id
+        })
+
 
 class GameOrder:
     class OrderNode:
