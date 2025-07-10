@@ -1,38 +1,36 @@
+import asyncio
 from typing import Dict, Union
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-# Import a utilities
-from .lib.utils import generate_game_code
-# Import the Player model (holds name, websocket connection, etc.)
-from .models.player import Player
 from .lib.game import Game
+from .lib.utils import generate_game_code
+from .models.player import Player
 
 app = FastAPI()
 
-# Enable CORS to allow clients from any origin to connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],       # Allow requests from all domains
-    allow_methods=["*"],       # Allow all HTTP methods
-    allow_headers=["*"],       # Allow all headers
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# In-memory store mapping game codes to Game instances
 games: Dict[str, "Game"] = {}
 
 
 @app.post("/create")
-def create_game_http():
+async def create_game_http():
     """
     HTTP endpoint to create a new game.
     Generates a unique code and initializes a Game instance.
     """
     code = generate_game_code()
-    # Ensure code uniqueness
     while code in games:
         code = generate_game_code()
+
     games[code] = Game(code)
     print(f"New game created: {code}")
     return {"success": True, "code": code}
@@ -42,133 +40,105 @@ def create_game_http():
 async def check_code(code: str):
     """
     HTTP endpoint to verify if a game code exists and is not full.
-    Returns JSON with 'exists' and 'full' booleans.
     """
-    if code in games:
-        return {"exists": True, "full": games[code].is_full()}
+    game = games.get(code)
+    if game:
+        return {"exists": True, "full": game.is_full()}
     return {"exists": False, "full": False}
 
 
 @app.websocket("/ws/game/{code}")
 async def game_ws(websocket: WebSocket, code: str):
     """
-    WebSocket endpoint for joining a game.
-    1. Accepts the connection.
-    2. Validates the game code.
-    3. Receives the player's name as the first message.
-    4. Adds the player if valid and broadcasts the join event.
-    5. Keeps the WebSocket alive in a loop until disconnect.
+    WebSocket endpoint for handling game connections and events.
     """
-    # Accept the WebSocket connection
     await websocket.accept()
-    print(f"WebSocket accepted for code: {code}")
+    game = games.get(code)
 
-    # If the game code is invalid, notify and close connection
-    if code not in games:
+    if not game:
         await websocket.send_json({"status": "error", "message": "Invalid game code"})
         await websocket.close()
         return
 
-    game = games[code]
     current_player: Union[Player, None] = None
     try:
-        # Expect the first message to contain {'name': <player_name>}
+        # 1. First message is for player registration
         data = await websocket.receive_json()
-        if "name" not in data:
-            await websocket.send_json({"status": "error", "message": "First message must contain 'name'."})
-            await websocket.close()
+        player_name = data.get("name")
+
+        if not player_name:
+            await websocket.send_json({"status": "error", "message": "Player name is required."})
             return
 
-        name = data["name"]
-        # Reject if game is full
         if game.is_full():
-            await websocket.send_json({"status": "error", "message": "Game is full"})
-            await websocket.close()
-            return
-        # Reject duplicate names (case-insensitive)
-        if any(p.name.lower() == name.lower() for p in game.players):
-            await websocket.send_json({"status": "error", "message": "Name already taken."})
-            await websocket.close()
+            await websocket.send_json({"status": "error", "message": "This game is full."})
             return
 
-        # Create Player object; first player becomes host
+        if any(p.name.lower() == player_name.lower() for p in game.players):
+            await websocket.send_json({"status": "error", "message": "This name is already taken."})
+            return
+
+        is_host = not game.players
         current_player = Player(
-            name=name,
-            websocket=websocket,
-            is_host=(len(game.players) == 0)
-        )
+            name=player_name, websocket=websocket, is_host=is_host)
         game.add_player(current_player)
-        print(f"Player {name} joined game {code}")
+        print(f"Player '{current_player.name}' joined game {code}")
 
-        # Inform all players about the new join
         await game.broadcast({
             "status": "player_joined",
-            "player_name": name,
+            "player": current_player.to_dict(),
             "players": game.to_dict_list()
         })
 
-        # Keep the connection alive indefinitely
+        # 2. Main game loop for handling player actions
         while True:
             data = await websocket.receive_json()
+            message_type = data.get("type")
 
-            if data.get("type") == "ready":
-                current_player.is_ready = True
-                print(f"{current_player.name} is ready in game {code}")
+            if message_type == "ready":
+                current_player.is_ready = data.get("is_ready", False)
+                print(
+                    f"Player '{current_player.name}' readiness changed to {current_player.is_ready} in game {code}")
                 await game.broadcast({
                     "status": "player_ready",
-                    "player_name": current_player.name,
-                    "players": game.to_dict_list()
+                    "player_id": current_player.id,
+                    "is_ready": current_player.is_ready,
                 })
 
-            if all(p.is_ready for p in game.players):
-                if len(game.players) > 1:
-                    print(f"All players ready in game {code}")
-                    await game.broadcast({
-                        "status": "game_started"
-                    })
-                    game.start_game()
-                else:
-                    await current_player.websocket.send_json({
-                        "status": "error",
-                        "message": "Bro, you're alone. Invite someone else to start the game."
-                    })
-                break
-
-        # Start the game loop
-        while True:
-            data = await websocket.receive_json()
-            if data.get("move"):
-                move = data["move"]
-                # Process the player's move
-                if game.order.current_player() == current_player:
+                # Check if all players are ready to start
+                if len(game.players) > 1 and all(p.is_ready for p in game.players):
                     print(
-                        f"{current_player.name} made a move in game {code}: {move}")
-                    await game.process_move(current_player, move)
+                        f"All players are ready in game {code}. Starting game.")
+                    await game.start_game()
+
+            elif message_type == "move" and game.started:
+                if game.order.get_current_player().id == current_player.id:
+                    await game.process_move(current_player, data.get("move"))
                 else:
-                    await current_player.websocket.send_json({
-                        "status": "error",
-                        "message": "It's not your turn."
-                    })
+                    await websocket.send_json({"status": "error", "message": "It's not your turn."})
+
+            elif message_type == "draw_card" and game.started:
+                if game.order.get_current_player().id == current_player.id:
+                    await game.draw_card(current_player)
+                else:
+                    await websocket.send_json({"status": "error", "message": "It's not your turn."})
 
     except WebSocketDisconnect:
-        # Handle clean-up on disconnect
+        print(
+            f"Player '{current_player.name if current_player else 'Unknown'}' disconnected from game {code}")
+    except Exception as e:
+        print(f"An unexpected error occurred in game {code}: {e}")
+    finally:
+        # Cleanup on disconnect or error
         if current_player:
             game.remove_player(current_player)
-            print(
-                f"Player {current_player.name} disconnected from game {code}")
             if game.players:
-                # Notify remaining players
                 await game.broadcast({
                     "status": "player_left",
-                    "player_name": current_player.name,
+                    "player_id": current_player.id,
                     "players": game.to_dict_list()
                 })
             else:
-                # No players left: remove the game
+                # If no players are left, remove the game from memory
                 del games[code]
-                print(f"Game {code} removed - no players left")
-    except Exception as e:
-        # Catch-all for unexpected errors
-        print(f"Error in game {code}: {e}")
-        if current_player:
-            game.remove_player(current_player)
+                print(f"Game {code} has been closed.")
