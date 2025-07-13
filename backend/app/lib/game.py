@@ -1,5 +1,6 @@
 import random
-from typing import Dict, List
+from typing import Dict, List, Optional
+import asyncio
 
 from ..models.player import Player
 from .utils import generate_deck
@@ -13,10 +14,16 @@ class Game:
     def __init__(self, code: str):
         self.code = code
         self.players: List[Player] = []
+
         self.started = False
+
         self.deck: List[Dict] = []
         self.discard_pile: List[Dict] = []
+
         self.order: 'GameOrder' = None
+
+        self.colo_pending: Optional[Player] = None
+        self.colo_task: Optional[asyncio.Task] = None
 
     async def broadcast(self, message: dict):
         """Sends a message to all connected players in the game."""
@@ -188,6 +195,84 @@ class Game:
             "new_count": len(player.hand)
         })
 
+    async def start_colo_challenge(self, player: Player, broadcast_callback):
+        """
+        Called when a player has one card left to initiate the 'COLO' challenge.
+        """
+        if self.colo_task:  # Cancel any existing challenge
+            self.colo_task.cancel()
+
+        self.colo_pending = player
+        await broadcast_callback({
+            "status": "colo_started",
+            "target_player_id": player.id,
+        })
+
+        self.colo_task = asyncio.create_task(
+            self._colo_timeout(broadcast_callback))
+
+    async def _colo_timeout(self, broadcast_callback):
+        try:
+            await asyncio.sleep(5)  # 5 seconds to press "COLO"
+            # Timeout occurred, no one pressed
+            self.colo_pending = None
+            self.colo_task = None
+            await broadcast_callback({
+                "status": "colo_timeout"
+            })
+        except asyncio.CancelledError:
+            pass
+
+    async def colo_pressed(self, player: Player, broadcast_callback):
+        """
+        Called when a player presses the 'COLO' button.
+        If another player catches the one with 1 card — penalty applies.
+        """
+        if self.colo_pending is None:
+            await player.websocket.send_json({
+                "status": "colo_invalid_press",
+                "message": "There is no COLO challenge right now."
+            })
+            return
+
+        target = self.colo_pending
+
+        if player.id == target.id:
+            # The player with 1 card pressed COLO — success!
+            await player.websocket.send_json({
+                "status": "colo_success",
+                "message": "You successfully called COLO!"
+            })
+        else:
+            # Someone else pressed COLO first — target player gets 2 penalty cards
+            penalty_cards = []
+            for _ in range(2):
+                if not self.deck:
+                    self._reshuffle_discard_pile()
+                if self.deck:
+                    card = self.deck.pop()
+                    target.hand.append(card)
+                    penalty_cards.append(card)
+
+            await target.websocket.send_json({
+                "status": "colo_penalty",
+                "message": "Another player called COLO before you!",
+                "new_cards": penalty_cards,
+                "your_hand": target.hand
+            })
+
+            await broadcast_callback({
+                "status": "colo_failed",
+                "target_id": target.id,
+                "by_id": player.id
+            })
+
+        # Reset challenge in all cases
+        if self.colo_task:
+            self.colo_task.cancel()
+        self.colo_task = None
+        self.colo_pending = None
+
 
 class GameOrder:
     """Manages the turn order of players in a circular fashion."""
@@ -204,7 +289,6 @@ class GameOrder:
         self.nodes = [self.OrderNode(p) for p in players]
         num_players = len(self.nodes)
 
-        # **FIXED**: The loop now correctly iterates based on the number of players.
         for i in range(num_players):
             self.nodes[i].next = self.nodes[(i + 1) % num_players]
             self.nodes[i].prev = self.nodes[(

@@ -96,7 +96,7 @@ async def game_ws(websocket: WebSocket, code: str):
             message_type = data.get("type")
 
             if message_type == "ready":
-                current_player.is_ready = data.get("is_ready", False)
+                current_player.is_ready = data.get("is_ready", True)
                 print(
                     f"Player '{current_player.name}' readiness changed to {current_player.is_ready} in game {code}")
                 await game.broadcast({
