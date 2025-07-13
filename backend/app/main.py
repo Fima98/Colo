@@ -113,8 +113,13 @@ async def game_ws(websocket: WebSocket, code: str):
 
             elif message_type == "move" and game.started:
                 if game.order.get_current_player().id == current_player.id:
-                    await game.process_move(current_player, data.get("move"))
-                    if len(current_player.hand) == 1:
+                    result = await game.process_move(current_player, data.get("move"))
+                    if result and result.get("game_over"):
+                        print(
+                            f"Game {code} ended. Winner: {result['winner_id']}")
+                        del games[code]
+                        return
+                    elif len(current_player.hand) == 1:
                         await game.start_colo_challenge(
                             player=current_player,
                             broadcast_callback=game.broadcast
