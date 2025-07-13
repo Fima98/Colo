@@ -114,6 +114,11 @@ async def game_ws(websocket: WebSocket, code: str):
             elif message_type == "move" and game.started:
                 if game.order.get_current_player().id == current_player.id:
                     await game.process_move(current_player, data.get("move"))
+                    if len(current_player.hand) == 1:
+                        await game.start_colo_challenge(
+                            player=current_player,
+                            broadcast_callback=game.broadcast
+                        )
                 else:
                     await websocket.send_json({"status": "error", "message": "It's not your turn."})
 
@@ -122,6 +127,13 @@ async def game_ws(websocket: WebSocket, code: str):
                     await game.draw_card(current_player)
                 else:
                     await websocket.send_json({"status": "error", "message": "It's not your turn."})
+
+            elif message_type == "colo":
+                await game.colo_pressed(
+                    caller=current_player,
+                    draw_card_callback=game.draw_card,
+                    broadcast_callback=game.broadcast
+                )
 
     except WebSocketDisconnect:
         print(
